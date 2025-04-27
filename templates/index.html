@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Spotify Recommendations</title>
+    </head>
+    <body>
+        <h1>Spotify Recommendations</h1>
+
+        <!-- Search Form -->
+        <form method="POST">
+            <input
+                type="text"
+                name="song_name"
+                placeholder="Enter a song name"
+                required
+            />
+            <button type="submit" name="search-song">Search</button>
+        </form>
+
+        <!-- Display Search Results -->
+        {% if search_results %}
+        <h2>Search Results</h2>
+        <form method="POST">
+            <ul>
+                {% for track in search_results %}
+                <li>
+                    <input
+                        type="radio"
+                        name="track_id"
+                        value="{{ track.id }}"
+                        required
+                    />
+                    {{ track.name }} by {{ track.artist }}
+                    <a href="{{ track.url }}" target="_blank">Listen</a>
+                </li>
+                {% endfor %}
+            </ul>
+            <button type="submit" name="get_recommendations">
+                Get Recommendations
+            </button>
+        </form>
+        {% endif %}
+
+        <!-- Manual Seed Input Form -->
+        <h2>Generate Recommendations with Custom Seeds</h2>
+        <form method="POST">
+            <label for="track_id">Seed Track ID:</label>
+            <input
+                type="text"
+                name="track_id"
+                id="track_id"
+                placeholder="Enter a track ID"
+            />
+
+            <label for="seed_artists">Seed Artists (comma-separated):</label>
+            <input
+                type="text"
+                name="seed_artists"
+                id="seed_artists"
+                placeholder="Enter artist IDs"
+            />
+
+            <label for="seed_genres">Seed Genres (comma-separated):</label>
+            <input
+                type="text"
+                name="seed_genres"
+                id="seed_genres"
+                placeholder="Enter genres"
+            />
+
+            <button type="submit" name="get_recommendations">
+                Get Recommendations
+            </button>
+        </form>
+
+        <!-- Display Recommendations -->
+        {% if recommendations %}
+        <h2>Recommendations</h2>
+        <form method="POST">
+            <ul>
+                {% for track in recommendations %}
+                <li>
+                    <input
+                        type="checkbox"
+                        name="track_ids"
+                        value="{{ track.id }}"
+                    />
+                    {{ track.name }} by {{ track.artist }}
+                    <a href="{{ track.url }}" target="_blank">Listen</a>
+                </li>
+                {% endfor %}
+            </ul>
+            <input
+                type="text"
+                name="playlist_name"
+                placeholder="Playlist Name"
+                required
+            />
+            <button type="submit" name="create_playlist">
+                Create Playlist
+            </button>
+        </form>
+        {% endif %}
+
+        <!-- Display Playlist URL -->
+        {% if playlist_url %}
+        <h2>Playlist Created</h2>
+        <p><a href="{{ playlist_url }}" target="_blank">View Playlist</a></p>
+        {% endif %}
+
+        <!-- Display Error -->
+        {% if error %}
+        <p style="color: red">{{ error }}</p>
+        {% endif %}
+    </body>
+</html>

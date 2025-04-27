@@ -1,90 +1,187 @@
 # Callback for server to get imformation:  http://127.0.0.1:8000/callback
-# Client ID: fc3735a0571c4df6af0defd64b875c4b
+# Client ID: c9774ae12bd948ecb0cbd29e175b182c
 # Client Secret: 4ac6fac31b3441a3b7eeae3a9cc6d453
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import os
-from typing import Any, Dict
+from flask import Flask, render_template, request
+import requests
 
-os.environ["SPOTIFY_CLIENT_ID"] = "fc3735a0571c4df6af0defd64b875c4b"
-os.environ["SPOTIFY_CLIENT_SECRET"] = "4ac6fac31b3441a3b7eeae3a9cc6d453"
-os.environ["SPOTIFY_REDIRECT_URI"] = "http://127.0.0.1:8000/callback"
+app = Flask(__name__)
 
-scope = "playlist-read-private playlist-modify-private user-library-read"
+os.environ["SPOTIPY_CLIENT_ID"] = "c9774ae12bd948ecb0cbd29e175b182c"
+os.environ["SPOTIPY_CLIENT_SECRET"] = "157c3b964c9b44a0a5ed417fdf6ed9ea"
+os.environ["SPOTIPY_REDIRECT_URI"] = "http://127.0.0.1:8000/callback"
 
-client_id = os.getenv('SPOTIPY_CLIENT_ID')
-client_secret = os.getenv('SPOTIPY_CLIENT_SECRET')
-redirct_uri = os.getenv('SPOTIPY_REDIRECT_URI')
+scope = "playlist-read-private playlist-modify-private user-library-read user-read-private user-read-email user-top-read user-library-modify"
 
-# Debugging the client_id's needed for the SpotifyClientCredentials to work
-print("SPOTIFY_CLIENT_ID:", os.getenv('SPOTIFY_CLIENT_ID'))
-print("SPOTIFY_CLIENT_SECRET:", os.getenv('SPOTIFY_CLIENT_SECRET'))
-print("SPOTIFY_REDIRECT_URI:", os.getenv('SPOTIFY_REDIRECT_URI'))
-
-if not client_id or not client_secret:
-    raise ValueError("Enviormental variables are not set")
-
-sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=scope))
-
-def fetch_user_playlist(sp: spotipy.Spotify):
-    try:
-        playlists: Dict[str, Any] = sp.cuurent_user_playlists()
-        while playlists:
-            items = playlists.get('items')
-            if items:
-                for playlist in items:
-                    print(f"Playlist: {playlist['name']} (ID: {playlist['id']})")
-            else:
-                print('No playlists found')
-            if playlists.get('next'):
-                playlists = sp.next(playlists)
-            else:
-                playlists = None
-    except spotipy.exceptions.SpotifyException as e:
-        print(f"Error fetching playlists: {e}")
-
-'''
 try:
-    playlists = sp.current_user_playlists()
-    if playlists is not None and 'items' in playlists:
-        for playlist in playlists['items']:
-            print(f"Playlist: {playlist['name']} (ID: {playlist['id']})")
+    auth_manager = SpotifyOAuth(scope=scope, cache_path=".spotify_cache")
+    sp = spotipy.Spotify(auth_manager=auth_manager)
+
+    # Debugging: Print token info
+    token_info = auth_manager.get_cached_token()
+    if token_info:
+        print("Access Token:", token_info['access_token'])
+        print("Expires At:", token_info['expires_at'])
     else:
-        print("No playlists found or invalid response.")
-except spotipy.exceptions.SpotifyException as e:
-    print(f"Error fetching playlists: {e}")
-'''
+        print("No token found. Please authenticate.")
 
-def create_playlist(name, description=""):
-    user_id = sp.current_user()
-    playlist = sp.user_playlist_create(user=user_id, name=name, public=False, description=description)
-    print(f"Created Playlist: {playlist['name']} (ID: {playlist['id']})")
-    return playlist
+except Exception as e:
+    print(f"Error during authentication: {e}")
 
-if __name__ == '__main__':
-    print("Fetching your playlist....")
-    get_user_playlist()
+def search_song(song_name, limit=20):
+    try:
+        results = sp.search(q=song_name, type="track", limit=limit)
 
-    print("\nCreating a new playlist... With recommendations")
-    create_playlist("Your new Playlist", "This is a test playlist created with spotify")
+        tracks = []
+        for item in results['tracks']['items']:
+            tracks.append({
+                'id': item['id'],
+                'name': item['name'],
+                'artist': item['artists'][0]['name'],
+                'url': item['external_urls']['spotify']
+            })
 
-top_tracks = sp.current_user_top_tracks(limit=5)
-seed_tracks = [track['id'] for track in top_tracks['items']]
+        return tracks
+    except Exception as e:
+        print(f"Error during search: {e}")
+        return []
 
-top_artists = sp.current_user_top_artists(limit=5)
-seed_artists = [artist['id']for artist in top_artists['items']]
 
-try:
-    recommendations = sp.recommendations(
-        seed_artists=seed_artists,
-        seed_tracks=seed_tracks,
-        seed_genres=seed_genres,
-        target_danceability=0.8,
-        target_energy=0.7,
-        target_tempo=120,
-        limit=10
-    )
-    for track in recommendations['tracks']:
-        print(f"{track + 1}. {track['name']} by {', '.join(artist['name'] for artist in track['artist'])}")
-except spotipy.exceptions.SpotifyException as e:
-    print(f"Error: {e}")
+def get_recommendations(seed_track=None, seed_artists=None, seed_genres=None, num_recommendations=10):
+    try:
+        # Refresh token if needed
+        token_info = auth_manager.get_cached_token()
+        if not token_info or not auth_manager.validate_token(token_info):
+            token_info = auth_manager.refresh_access_token(token_info['refresh_token'])
+
+        access_token = token_info['access_token']
+
+        # Build request parameters
+        params = {'limit': num_recommendations}
+        if seed_track:
+            params['seed_tracks'] = seed_track
+        if seed_artists:
+            params['seed_artists'] = ','.join(seed_artists) if isinstance(seed_artists, list) else seed_artists
+        if seed_genres:
+            params['seed_genres'] = ','.join(seed_genres) if isinstance(seed_genres, list) else seed_genres
+
+        # Make request directly
+        headers = {'Authorization': f'Bearer {access_token}'}
+        url = 'https://api.spotify.com/v1/recommendations'
+
+        print(f"Making request to: {url}")
+        print(f"With params: {params}")
+
+        response = requests.get(url, headers=headers, params=params)
+
+        if response.status_code == 404:
+            print("Error: Seed track, artist, or genre not found.")
+            print(f"Response content: {response.text}")
+            return []
+
+        if response.status_code != 200:
+            print(f"API request failed with status code: {response.status_code}")
+            print(f"Response content: {response.text}")
+            return []
+
+        data = response.json()
+
+        # Process recommended tracks
+        recommended_tracks = []
+        for track in data['tracks']:
+            artist_name = track['artists'][0]['name'] if track['artists'] else "Unknown Artist"
+            recommended_tracks.append({
+                'id': track['id'],
+                'name': track['name'],
+                'artist': artist_name,
+                'url': track['external_urls']['spotify']
+            })
+
+        return recommended_tracks
+    except Exception as e:
+        print(f"Error during recommendations: {e}")
+        return []
+
+def create_playlist(user_id, playlist_name, track_ids):
+    try:
+        playlist = sp.user_playlist_create(user=user_id, name=playlist_name, public=False)
+        playlist_id = playlist['id']
+
+        sp.playlist_add_items(playlist_id, track_ids)
+        return playlist['external_urls']['spotify']
+    except Exception as e:
+        print(f"Error during the playlist creation: {e}")
+
+
+@app.route("/", methods=['GET', 'POST'])
+def index():
+    """Main route for the web app."""
+    recommendations = []
+    search_results = []
+    playlist_url = None
+    error = None
+
+    if request.method == "POST":
+
+        if 'search-song' in request.form:
+            # Handle song search
+            song_name = request.form.get('song_name')
+            search_results = search_song(song_name)
+            if not search_results:
+                error = "No songs found. Please try again."
+
+        elif "get_recommendations" in request.form:
+            # Handle recommendations
+            seed_track = request.form.get("track_id")
+            seed_artists = request.form.get("seed_artists")
+            seed_genres = request.form.get("seed_genres")
+
+            print(f"Raw Seed Track from Form: {seed_track}")
+            print(f"Seed Track Type from Form: {type(seed_track)}")
+
+            if seed_track and not isinstance(seed_track, str):
+                raise ValueError("Invalid seed_track. Expected a string.")
+
+            # Convert seed_artists and seed_genres to lists if provided
+            seed_artists = seed_artists.split(',') if seed_artists else None
+            seed_genres = seed_genres.split(',') if seed_genres else None
+
+            print(f" Processed Seed Track: {seed_track}")
+            print(f" Processed Seed Artists: {seed_artists}")
+            print(f" Processed Seed Genres: {seed_genres}")
+
+            if seed_track or seed_artists or seed_genres:
+                recommendations = get_recommendations(
+                    seed_track=seed_track,
+                    seed_artists=seed_artists,
+                    seed_genres=seed_genres
+                )
+            else:
+                error = "Please provide at least one seed value (track, artist, or genre)."
+
+        elif "create_playlist" in request.form:
+            try:
+                track_ids = request.form.getlist("track_ids")
+                print(f"Raw Track IDs: {track_ids}")
+
+                if not track_ids:
+                    raise ValueError("No tracks selected. Please select at least one track.")
+                playlist_name = request.form.get("playlist_name")
+                user_id = sp.current_user()['id']
+
+                print(f"Track IDs Type: {type(track_ids)}")
+                print(f"Track IDs Content: {track_ids}")
+                playlist = create_playlist(user_id, playlist_name, track_ids)
+                if playlist:
+                    playlist_url = playlist['external_urls']['spotify']
+                else:
+                    error = "Failed to create playlist. Please try again."
+            except Exception as e:
+                error = f"An error occurred while creating the playlist: {e}"
+
+    return render_template("index.html", recommendations=recommendations, playlist_url=playlist_url, search_results=search_results, error=error)
+
+if __name__ == "__main__":
+    app.run(debug=True, port=8080)
