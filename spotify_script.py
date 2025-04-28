@@ -1,3 +1,8 @@
+<<<<<<< HEAD
+=======
+# Callback for server to get imformation:  http://127.0.0.1:8000/callback
+# Client ID: c9774ae12bd948ecb0cbd29e175b182c
+>>>>>>> ac357341b8ee56ba911ae980fcbd01d6b059a0f9
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import os
