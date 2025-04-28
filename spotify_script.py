@@ -1,37 +1,56 @@
-# Callback for server to get imformation:  http://127.0.0.1:8000/callback
-# Client ID: c9774ae12bd948ecb0cbd29e175b182c
-# Client Secret: 4ac6fac31b3441a3b7eeae3a9cc6d453
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import os
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify
 import requests
+import logging
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key')
 
+# Correct client credentials and set environment variables
 os.environ["SPOTIPY_CLIENT_ID"] = "c9774ae12bd948ecb0cbd29e175b182c"
-os.environ["SPOTIPY_CLIENT_SECRET"] = "157c3b964c9b44a0a5ed417fdf6ed9ea"
+os.environ["SPOTIPY_CLIENT_SECRET"] = "4ac6fac31b3441a3b7eeae3a9cc6d453"  # Using the correct secret from comments
 os.environ["SPOTIPY_REDIRECT_URI"] = "http://127.0.0.1:8000/callback"
 
 scope = "playlist-read-private playlist-modify-private user-library-read user-read-private user-read-email user-top-read user-library-modify"
 
-try:
-    auth_manager = SpotifyOAuth(scope=scope, cache_path=".spotify_cache")
-    sp = spotipy.Spotify(auth_manager=auth_manager)
+# Set up logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+app.logger.setLevel(logging.DEBUG)
 
-    # Debugging: Print token info
+# Create auth manager for reuse
+auth_manager = SpotifyOAuth(
+    client_id=os.environ["SPOTIPY_CLIENT_ID"],
+    client_secret=os.environ["SPOTIPY_CLIENT_SECRET"],
+    redirect_uri=os.environ["SPOTIPY_REDIRECT_URI"],
+    scope=scope,
+    cache_path=".spotify_cache",
+    show_dialog=True
+)
+
+def get_spotify_client():
+    """Gets an authenticated Spotify client"""
     token_info = auth_manager.get_cached_token()
-    if token_info:
-        print("Access Token:", token_info['access_token'])
-        print("Expires At:", token_info['expires_at'])
-    else:
-        print("No token found. Please authenticate.")
+    if not token_info:
+        return None
 
-except Exception as e:
-    print(f"Error during authentication: {e}")
+    # Check if token is expired and refresh if needed
+    if auth_manager.is_token_expired(token_info):
+        token_info = auth_manager.refresh_access_token(token_info['refresh_token'])
+
+    return spotipy.Spotify(auth=token_info['access_token'])
 
 def search_song(song_name, limit=20):
+    """Search for songs on Spotify"""
     try:
+        sp = get_spotify_client()
+        if not sp:
+            return []
+
         results = sp.search(q=song_name, type="track", limit=limit)
 
         tracks = []
@@ -45,143 +64,343 @@ def search_song(song_name, limit=20):
 
         return tracks
     except Exception as e:
-        print(f"Error during search: {e}")
+        app.logger.error(f"Error during search: {str(e)}")
         return []
-
 
 def get_recommendations(seed_track=None, seed_artists=None, seed_genres=None, num_recommendations=10):
+    """Get track recommendations from Spotify API"""
     try:
-        # Refresh token if needed
-        token_info = auth_manager.get_cached_token()
-        if not token_info or not auth_manager.validate_token(token_info):
-            token_info = auth_manager.refresh_access_token(token_info['refresh_token'])
+        sp = get_spotify_client()
+        if not sp:
+            app.logger.error("Not authenticated")
+            return []
 
-        access_token = token_info['access_token']
+        # Build parameters
+        params = {'limit': min(num_recommendations, 100)}
 
-        # Build request parameters
-        params = {'limit': num_recommendations}
-        if seed_track:
-            params['seed_tracks'] = seed_track
+        # Handle track seeds - IMPORTANT FIX HERE
+        if seed_track and isinstance(seed_track, str) and seed_track.strip():
+            # Don't use commas, use a list directly
+            params['seed_tracks'] = [seed_track.strip()]
+            app.logger.debug(f"Using seed track: {params['seed_tracks']}")
+
+        # Handle artist seeds
         if seed_artists:
-            params['seed_artists'] = ','.join(seed_artists) if isinstance(seed_artists, list) else seed_artists
+            if isinstance(seed_artists, list):
+                params['seed_artists'] = seed_artists
+            elif isinstance(seed_artists, str) and seed_artists.strip():
+                # Use a list for artists too
+                params['seed_artists'] = [seed_artists.strip()]
+
+        # Handle genre seeds
         if seed_genres:
-            params['seed_genres'] = ','.join(seed_genres) if isinstance(seed_genres, list) else seed_genres
+            if isinstance(seed_genres, list):
+                params['seed_genres'] = seed_genres
+            elif isinstance(seed_genres, str) and seed_genres.strip():
+                # Use a list for genres
+                params['seed_genres'] = [seed_genres.strip()]
 
-        # Make request directly
-        headers = {'Authorization': f'Bearer {access_token}'}
-        url = 'https://api.spotify.com/v1/recommendations'
+        app.logger.info(f"Getting recommendations with params: {params}")
 
-        print(f"Making request to: {url}")
-        print(f"With params: {params}")
+        # Get recommendations
+        recommendations = sp.recommendations(**params)
 
-        response = requests.get(url, headers=headers, params=params)
-
-        if response.status_code == 404:
-            print("Error: Seed track, artist, or genre not found.")
-            print(f"Response content: {response.text}")
-            return []
-
-        if response.status_code != 200:
-            print(f"API request failed with status code: {response.status_code}")
-            print(f"Response content: {response.text}")
-            return []
-
-        data = response.json()
-
-        # Process recommended tracks
+        # Process results
         recommended_tracks = []
-        for track in data['tracks']:
-            artist_name = track['artists'][0]['name'] if track['artists'] else "Unknown Artist"
+        for track in recommendations.get('tracks', []):
+            artist_name = track['artists'][0]['name'] if track.get('artists') else "Unknown Artist"
             recommended_tracks.append({
-                'id': track['id'],
-                'name': track['name'],
+                'id': track.get('id', ''),
+                'name': track.get('name', 'Unknown Track'),
                 'artist': artist_name,
-                'url': track['external_urls']['spotify']
+                'url': track.get('external_urls', {}).get('spotify', '#')
             })
 
+        app.logger.info(f"Found {len(recommended_tracks)} recommended tracks")
         return recommended_tracks
+
     except Exception as e:
-        print(f"Error during recommendations: {e}")
+        app.logger.error(f"Error getting recommendations: {str(e)}")
         return []
 
-def create_playlist(user_id, playlist_name, track_ids):
+def _ensure_authentication():
+    """Ensure the user is authenticated with Spotify. Returns True if authenticated."""
     try:
-        playlist = sp.user_playlist_create(user=user_id, name=playlist_name, public=False)
-        playlist_id = playlist['id']
+        token_info = auth_manager.get_cached_token()
+        if not token_info:
+            app.logger.info("No token found, authentication required")
+            return False
 
-        sp.playlist_add_items(playlist_id, track_ids)
-        return playlist['external_urls']['spotify']
+        # Check if token is expired
+        if auth_manager.is_token_expired(token_info):
+            app.logger.info("Token expired, refreshing")
+            token_info = auth_manager.refresh_access_token(token_info['refresh_token'])
+
+        # Test the token
+        sp = spotipy.Spotify(auth=token_info['access_token'])
+        sp.current_user()
+        return True
+
     except Exception as e:
-        print(f"Error during the playlist creation: {e}")
+        app.logger.error(f"Authentication error: {str(e)}")
+        return False
 
+def _handle_song_search(form_data, search_results):
+    """Handle song search form submission. Updates search_results list.
+    Returns error message if any."""
+    song_name = form_data.get('song_name', '').strip()
+    if not song_name:
+        return "Please enter a song name to search"
+
+    try:
+        results = search_song(song_name)
+        if results:
+            search_results.clear()  # Clear previous results
+            search_results.extend(results)
+            return None
+        else:
+            return "No songs found. Please try again."
+    except Exception as e:
+        app.logger.error(f"Search error: {str(e)}")
+        return f"Error searching for songs: {str(e)}"
+
+def _handle_recommendations(form_data, recommendations):
+    """Handle recommendations form submission. Updates recommendations list.
+    Returns error message if any."""
+    try:
+        # Get the track ID directly - no splitting
+        seed_track = form_data.get("track_id", "").strip()
+        app.logger.debug(f"Raw track ID from form: {seed_track}")
+
+        # Get artists and genres
+        seed_artists = form_data.get("seed_artists", "").strip()
+        seed_genres = form_data.get("seed_genres", "").strip()
+
+        # Validate inputs
+        if not (seed_track or seed_artists or seed_genres):
+            return "Please provide at least one seed value (track, artist, or genre)."
+
+        # Convert comma-separated values to lists (if needed)
+        artists_list = None
+        if seed_artists:
+            artists_list = [a.strip() for a in seed_artists.split(',') if a.strip()]
+
+        genres_list = None
+        if seed_genres:
+            genres_list = [g.strip() for g in seed_genres.split(',') if g.strip()]
+
+        # IMPORTANT: Log the exact track ID being used
+        app.logger.debug(f"Using track ID: {seed_track}")
+
+        # Get recommendations
+        results = get_recommendations(
+            seed_track=seed_track,  # Pass the raw track ID
+            seed_artists=artists_list,
+            seed_genres=genres_list
+        )
+
+        if results:
+            recommendations.clear()
+            recommendations.extend(results)
+            return None
+        else:
+            return "No recommendations found. Please try different seeds."
+
+    except Exception as e:
+        app.logger.error(f"Recommendation error: {str(e)}")
+        return f"Error getting recommendations: {str(e)}"
+
+    except Exception as e:
+        app.logger.error(f"Recommendation error: {str(e)}")
+        return f"Error getting recommendations: {str(e)}"
+
+
+@app.route('/test_recommendation')
+def test_recommendation():
+    """Test endpoint with a hardcoded track ID"""
+    try:
+        # Use a valid Spotify track ID (Adele - Hello)
+        track_id = "4NHQUGzhtTLFvgF5SZesLK"
+
+        sp = get_spotify_client()
+        if not sp:
+            return "Not authenticated", 401
+
+        # Make the API call directly with this known-good ID
+        recommendations = sp.recommendations(seed_tracks=[track_id], limit=5)
+
+        tracks = []
+        for track in recommendations.get('tracks', []):
+            tracks.append({
+                'id': track['id'],
+                'name': track['name'],
+                'artist': track['artists'][0]['name'] if track.get('artists') else "Unknown"
+            })
+
+        return jsonify({
+            'test_track_id': track_id,
+            'recommendations': tracks
+        })
+    except Exception as e:
+        return f"Error: {str(e)}", 400
+
+
+# Routes
+@app.route('/login')
+def login():
+    # Generate auth URL
+    auth_url = auth_manager.get_authorize_url()
+    app.logger.info(f"Redirecting to Spotify auth URL: {auth_url}")
+    return redirect(auth_url)
+
+@app.route('/callback')
+def callback():
+    """Process the callback from Spotify after authorization"""
+    code = request.args.get('code')
+
+    if not code:
+        app.logger.error("No authorization code received")
+        return "Authentication failed: No code received", 400
+
+    # Get the token using the code
+    try:
+        token_info = auth_manager.get_access_token(code)
+        app.logger.info(f"Successfully obtained token, expires at: {token_info['expires_at']}")
+        return redirect(url_for('index'))
+    except Exception as e:
+        app.logger.error(f"Failed to get access token: {str(e)}")
+        return f"Authentication error: {str(e)}", 400
 
 @app.route("/", methods=['GET', 'POST'])
 def index():
     """Main route for the web app."""
+    # First, ensure authentication
+    if not _ensure_authentication():
+        return redirect(url_for('login'))
+
+    # Initialize results
     recommendations = []
     search_results = []
-    playlist_url = None
     error = None
 
+    # Handle form submissions
     if request.method == "POST":
-
         if 'search-song' in request.form:
-            # Handle song search
-            song_name = request.form.get('song_name')
-            search_results = search_song(song_name)
-            if not search_results:
-                error = "No songs found. Please try again."
+            error = _handle_song_search(request.form, search_results)
+        elif 'get_recommendations' in request.form:
+            error = _handle_recommendations(request.form, recommendations)
 
-        elif "get_recommendations" in request.form:
-            # Handle recommendations
-            seed_track = request.form.get("track_id")
-            seed_artists = request.form.get("seed_artists")
-            seed_genres = request.form.get("seed_genres")
+    # Render the template
+    return render_template("index.html",
+                          recommendations=recommendations,
+                          search_results=search_results,
+                          error=error)
 
-            print(f"Raw Seed Track from Form: {seed_track}")
-            print(f"Seed Track Type from Form: {type(seed_track)}")
+@app.route('/user_info')
+def user_info():
+    """Get detailed user information to check token permissions"""
+    try:
+        sp = get_spotify_client()
+        if not sp:
+            return "Not authenticated", 401
 
-            if seed_track and not isinstance(seed_track, str):
-                raise ValueError("Invalid seed_track. Expected a string.")
+        # Get user information
+        user = sp.current_user()
 
-            # Convert seed_artists and seed_genres to lists if provided
-            seed_artists = seed_artists.split(',') if seed_artists else None
-            seed_genres = seed_genres.split(',') if seed_genres else None
+        # Get user's playlists
+        playlists = sp.current_user_playlists(limit=5)
 
-            print(f" Processed Seed Track: {seed_track}")
-            print(f" Processed Seed Artists: {seed_artists}")
-            print(f" Processed Seed Genres: {seed_genres}")
+        token_info = auth_manager.get_cached_token()
 
-            if seed_track or seed_artists or seed_genres:
-                recommendations = get_recommendations(
-                    seed_track=seed_track,
-                    seed_artists=seed_artists,
-                    seed_genres=seed_genres
-                )
-            else:
-                error = "Please provide at least one seed value (track, artist, or genre)."
+        return jsonify({
+            'user': user,
+            'token_info': {
+                'expires_in': token_info.get('expires_in'),
+                'scope': token_info.get('scope'),
+            },
+            'playlists': playlists
+        })
+    except Exception as e:
+        return f"Error: {str(e)}", 400
 
-        elif "create_playlist" in request.form:
+@app.route('/related_artists/<artist_id>')
+def related_artists(artist_id):
+    try:
+        sp = get_spotify_client()
+        if not sp:
+            return "Not authenticated", 401
+
+        # Get related artists
+        related = sp.artist_related_artists(artist_id)
+
+        # Then get top tracks for each related artist
+        results = []
+        for artist in related.get('artists', [])[:5]:  # Limit to 5 artists
+            artist_info = {
+                'id': artist['id'],
+                'name': artist['name'],
+                'top_tracks': []
+            }
+
+            # Get top tracks for this artist
             try:
-                track_ids = request.form.getlist("track_ids")
-                print(f"Raw Track IDs: {track_ids}")
+                top_tracks = sp.artist_top_tracks(artist['id'], country='US')
+                for track in top_tracks.get('tracks', [])[:3]:  # Limit to 3 tracks per artist
+                    artist_info['top_tracks'].append({
+                        'id': track['id'],
+                        'name': track['name'],
+                        'preview_url': track['preview_url']
+                    })
+            except Exception as inner_e:
+                app.logger.error(f"Error getting top tracks: {str(inner_e)}")
 
-                if not track_ids:
-                    raise ValueError("No tracks selected. Please select at least one track.")
-                playlist_name = request.form.get("playlist_name")
-                user_id = sp.current_user()['id']
+            results.append(artist_info)
 
-                print(f"Track IDs Type: {type(track_ids)}")
-                print(f"Track IDs Content: {track_ids}")
-                playlist = create_playlist(user_id, playlist_name, track_ids)
-                if playlist:
-                    playlist_url = playlist['external_urls']['spotify']
-                else:
-                    error = "Failed to create playlist. Please try again."
-            except Exception as e:
-                error = f"An error occurred while creating the playlist: {e}"
+        return jsonify(results)
+    except Exception as e:
+        return f"Error: {str(e)}", 400
 
-    return render_template("index.html", recommendations=recommendations, playlist_url=playlist_url, search_results=search_results, error=error)
+@app.route('/test_track/<track_id>')
+def test_track(track_id):
+    try:
+        sp = get_spotify_client()
+        if not sp:
+            return "Not authenticated", 401
+
+        track = sp.track(track_id)
+        return jsonify(track)
+    except Exception as e:
+        return f"Error: {str(e)}", 400
+
+@app.route('/test_recommendations_direct')
+def test_recommendations_direct():
+    """Test recommendations with hardcoded track ID"""
+    try:
+        sp = get_spotify_client()
+        if not sp:
+            return "Not authenticated", 401
+
+        # Use a known working track ID directly
+        test_track_id = "4NHQUGzhtTLFvgF5SZesLK"  # Adele - Hello
+
+        # Make the API call
+        recommendations = sp.recommendations(seed_tracks=[test_track_id], limit=5)
+
+        # Process results
+        tracks = []
+        for item in recommendations.get('tracks', []):
+            tracks.append({
+                'id': item['id'],
+                'name': item['name'],
+                'artist': item['artists'][0]['name'] if item.get('artists') else "Unknown"
+            })
+
+        return jsonify({
+            'seed_track': test_track_id,
+            'recommendations': tracks
+        })
+    except Exception as e:
+        return f"Error: {str(e)}", 400
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8080)
+    app.run(debug=True, port=8000)
